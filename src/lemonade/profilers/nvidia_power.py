@@ -286,6 +286,67 @@ class NVIDIAPowerProfiler(Profiler):
         else:
             ax1.plot(df['time'], df['power_draw'])
 
+        # Draw prompt and iteration boundary lines if benchmark data is available
+        import lemonade.common.filesystem as fs
+        stats = fs.Stats(state.cache_dir, state.build_name)
+        if 'bench_prompt_boundaries' in stats.stats:
+            prompt_boundaries = stats.stats['bench_prompt_boundaries']
+            if prompt_boundaries and start_times:
+                # Get the benchmark start time offset
+                bench_start_time = start_times.get('llamacpp-bench', None)
+                first_tool_time = sorted(start_times.values())[1] if len(start_times) > 1 else None
+
+                if bench_start_time and first_tool_time:
+                    # Calculate the time offset between power measurements and benchmark start
+                    time_offset = bench_start_time - first_tool_time
+
+                    # Draw vertical lines for each prompt boundary and estimate iteration boundaries
+                    for i, boundary in enumerate(prompt_boundaries):
+                        # Calculate the time in power plot coordinates for this prompt
+                        prompt_start_time = boundary['timestamp'] - bench_start_time + time_offset
+
+                        # Calculate end time for this prompt (start of next prompt or end of benchmark)
+                        if i < len(prompt_boundaries) - 1:
+                            next_boundary = prompt_boundaries[i + 1]
+                            prompt_end_time = next_boundary['timestamp'] - bench_start_time + time_offset
+                        else:
+                            # Last prompt - use end of benchmark
+                            prompt_end_time = df['time'].iloc[-1]
+
+                        # Calculate duration for this prompt and estimate iteration duration
+                        prompt_duration = prompt_end_time - prompt_start_time
+                        num_iterations = boundary['iterations']
+                        iteration_duration = prompt_duration / num_iterations if num_iterations > 0 else 0
+
+                        # Only draw lines if within the plot range
+                        if df['time'].iloc[0] <= prompt_start_time <= df['time'].iloc[-1]:
+                            # Solid red line for prompt boundary (on all 3 plots)
+                            ax1.axvline(x=prompt_start_time, color='red', linestyle='-',
+                                       linewidth=2, alpha=0.8, zorder=10)
+                            ax2.axvline(x=prompt_start_time, color='red', linestyle='-',
+                                       linewidth=2, alpha=0.8, zorder=10)
+                            ax3.axvline(x=prompt_start_time, color='red', linestyle='-',
+                                       linewidth=2, alpha=0.8, zorder=10)
+
+                            # Add text annotation showing prompt size on first plot
+                            y_pos = ax1.get_ylim()[1] * 0.95  # 95% of y-axis height
+                            ax1.text(prompt_start_time, y_pos, f" {boundary['prompt_size']}tok",
+                                    rotation=90, verticalalignment='top',
+                                    fontsize=9, color='red', fontweight='bold')
+
+                            # Draw dashed gray lines for iteration boundaries within this prompt
+                            if num_iterations > 1 and iteration_duration > 0:
+                                for iter_num in range(1, num_iterations):
+                                    iter_time = prompt_start_time + (iter_num * iteration_duration)
+                                    if df['time'].iloc[0] <= iter_time <= df['time'].iloc[-1]:
+                                        # Dashed gray line for iteration boundaries (on all 3 plots)
+                                        ax1.axvline(x=iter_time, color='gray', linestyle='--',
+                                                   linewidth=1, alpha=0.5, zorder=5)
+                                        ax2.axvline(x=iter_time, color='gray', linestyle='--',
+                                                   linewidth=1, alpha=0.5, zorder=5)
+                                        ax3.axvline(x=iter_time, color='gray', linestyle='--',
+                                                   linewidth=1, alpha=0.5, zorder=5)
+
         # Add title and labels to first plot
         ax1.set_ylabel("GPU Power Draw [W]")
         title_str = "NVIDIA GPU Power Stats\n" + "\n".join(textwrap.wrap(state.build_name, 60))

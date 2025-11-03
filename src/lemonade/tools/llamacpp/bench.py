@@ -155,6 +155,7 @@ class LlamaCppBench(Bench):
             self.std_dev_token_generation_tokens_per_second_list.append(None)
 
     def run_llama_bench_exe(self, state, prompts, iterations, output_tokens):
+        import time
 
         if prompts is None:
             prompts = [default_prompt_length]
@@ -174,8 +175,19 @@ class LlamaCppBench(Bench):
         all_tg_tps = []
         all_tg_tps_sd = []
 
+        # Track prompt boundaries for power profiling visualization
+        prompt_boundaries = []
+
         # Run benchmark separately for each prompt size to get per-prompt token generation speeds
         for prompt in prompts:
+            # Record timestamp at the start of this prompt's benchmark
+            prompt_start_time = time.time()
+            prompt_boundaries.append({
+                'prompt_size': prompt,
+                'timestamp': prompt_start_time,
+                'iterations': iterations
+            })
+
             prompt_lengths, pp_tps, pp_tps_sd, tg_tps, tg_tps_sd = model.benchmark(
                 [prompt], iterations, output_tokens
             )
@@ -199,6 +211,9 @@ class LlamaCppBench(Bench):
         if iterations > 1:
             self.std_dev_token_generation_tokens_per_second_list = all_tg_tps_sd
         self.tokens_out_len_list = [output_tokens] * len(prompts) * iterations
+
+        # Save prompt boundaries for profiler visualization
+        state.save_stat("bench_prompt_boundaries", prompt_boundaries)
 
         self.save_stats(state)
         return state

@@ -166,19 +166,38 @@ class LlamaCppBench(Bench):
         state.save_stat("output_tokens", output_tokens)
 
         model: LlamaCppAdapter = state.model
-        prompt_lengths, pp_tps, pp_tps_sd, tg_tps, tg_tps_sd = model.benchmark(
-            prompts, iterations, output_tokens
-        )
-        self.input_ids_len_list = prompt_lengths
-        self.prefill_tokens_per_second_list = pp_tps
+
+        # Initialize aggregation lists for collecting results from multiple benchmark runs
+        all_prompt_lengths = []
+        all_pp_tps = []
+        all_pp_tps_sd = []
+        all_tg_tps = []
+        all_tg_tps_sd = []
+
+        # Run benchmark separately for each prompt size to get per-prompt token generation speeds
+        for prompt in prompts:
+            prompt_lengths, pp_tps, pp_tps_sd, tg_tps, tg_tps_sd = model.benchmark(
+                [prompt], iterations, output_tokens
+            )
+
+            # Aggregate results from this prompt size
+            all_prompt_lengths.extend(prompt_lengths)
+            all_pp_tps.extend(pp_tps)
+            all_pp_tps_sd.extend(pp_tps_sd)
+            all_tg_tps.append(tg_tps)
+            all_tg_tps_sd.append(tg_tps_sd)
+
+        # Store aggregated results
+        self.input_ids_len_list = all_prompt_lengths
+        self.prefill_tokens_per_second_list = all_pp_tps
         if iterations > 1:
-            self.std_dev_prefill_tokens_per_second_list = pp_tps_sd
+            self.std_dev_prefill_tokens_per_second_list = all_pp_tps_sd
         self.mean_time_to_first_token_list = [
-            tokens / tps for tokens, tps in zip(prompt_lengths, pp_tps)
+            tokens / tps for tokens, tps in zip(all_prompt_lengths, all_pp_tps)
         ]
-        self.token_generation_tokens_per_second_list = [tg_tps]
+        self.token_generation_tokens_per_second_list = all_tg_tps
         if iterations > 1:
-            self.std_dev_token_generation_tokens_per_second_list = [tg_tps_sd]
+            self.std_dev_token_generation_tokens_per_second_list = all_tg_tps_sd
         self.tokens_out_len_list = [output_tokens] * len(prompts) * iterations
 
         self.save_stats(state)

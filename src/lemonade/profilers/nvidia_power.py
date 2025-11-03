@@ -1,0 +1,332 @@
+
+
+import os
+import platform
+import textwrap
+import time
+import threading
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import lemonade.common.printing as printing
+from lemonade.profilers import Profiler
+from lemonade.tools.report.table import LemonadePerfTable, DictListStat
+
+try:
+    import pynvml
+    PYNVML_AVAILABLE = True
+except ImportError:
+    PYNVML_AVAILABLE = False
+
+DEFAULT_TRACK_POWER_INTERVAL_S = 1.0  # Sample every 1 second
+DEFAULT_TRACK_POWER_WARMUP_PERIOD = 5  # 5 second warmup
+
+POWER_USAGE_CSV_FILENAME = "power_usage_nvidia.csv"
+POWER_USAGE_PNG_FILENAME = "power_usage_nvidia.png"
+
+
+class Keys:
+    # Path to the file containing the power usage plot
+    POWER_USAGE_PLOT = "power_usage_plot_nvidia"
+    # Power usage data
+    POWER_USAGE_DATA = "power_usage_data_nvidia"
+    # Path to the CSV file containing the power usage data
+    POWER_USAGE_DATA_CSV = "power_usage_data_file_nvidia"
+    # Maximum power consumed by the GPU during the tools sequence
+    PEAK_GPU_POWER = "peak_gpu_power_nvidia"
+
+
+# Add column to the Lemonade performance report table for the power data
+LemonadePerfTable.table_descriptor["stat_columns"].append(
+    DictListStat(
+        "Power Usage (NVIDIA)",
+        Keys.POWER_USAGE_DATA,
+        [
+            ("name", "{0}:"),
+            ("duration", "{0:.1f}s,"),
+            ("energy consumed", "{0:.1f} J"),
+        ],
+    )
+)
+
+
+class NVIDIAPowerProfiler(Profiler):
+
+    unique_name = "power-nvidia"
+
+    @staticmethod
+    def add_arguments_to_parser(parser):
+        parser.add_argument(
+            f"--{NVIDIAPowerProfiler.unique_name}",
+            nargs="?",
+            metavar="WARMUP_PERIOD",
+            type=int,
+            default=None,
+            const=DEFAULT_TRACK_POWER_WARMUP_PERIOD,
+            help="Track NVIDIA GPU power consumption using NVML (NVIDIA Management Library) "
+            "and plot the results. Requires pynvml Python package (pip install pynvml). "
+            "Optionally, set the warmup period in seconds "
+            f"(default: {DEFAULT_TRACK_POWER_WARMUP_PERIOD}). "
+            "This works on Linux/Windows systems with NVIDIA GPUs. "
+            "You can optionally set the GPU_DEVICE_INDEX environment variable to select "
+            "a specific GPU (default: 0).",
+        )
+
+    def __init__(self, parser_arg_value):
+        super().__init__()
+        self.warmup_period = parser_arg_value
+        self.status_stats += [Keys.PEAK_GPU_POWER, Keys.POWER_USAGE_PLOT]
+        self.tracking_active = False
+        self.build_dir = None
+        self.csv_path = None
+        self.data = None
+        self.power_data = []
+        self.monitoring_thread = None
+        self.gpu_handle = None
+        self.gpu_index = int(os.getenv("GPU_DEVICE_INDEX", "0"))
+
+    def _monitor_power(self):
+        """Background thread that monitors GPU power consumption."""
+        start_time = time.time()
+
+        while self.tracking_active:
+            try:
+                current_time = time.time() - start_time
+
+                # Get GPU metrics
+                power_draw = pynvml.nvmlDeviceGetPowerUsage(self.gpu_handle) / 1000.0  # Convert mW to W
+                temperature = pynvml.nvmlDeviceGetTemperature(self.gpu_handle, pynvml.NVML_TEMPERATURE_GPU)
+
+                # Get GPU utilization
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle)
+                gpu_util = utilization.gpu
+                mem_util = utilization.memory
+
+                # Get clock speeds
+                try:
+                    gpu_clock = pynvml.nvmlDeviceGetClockInfo(self.gpu_handle, pynvml.NVML_CLOCK_GRAPHICS)
+                    mem_clock = pynvml.nvmlDeviceGetClockInfo(self.gpu_handle, pynvml.NVML_CLOCK_MEM)
+                except pynvml.NVMLError:
+                    gpu_clock = 0
+                    mem_clock = 0
+
+                # Store data
+                self.power_data.append({
+                    'time': current_time,
+                    'power_draw': power_draw,
+                    'temperature': temperature,
+                    'gpu_utilization': gpu_util,
+                    'memory_utilization': mem_util,
+                    'gpu_clock': gpu_clock,
+                    'memory_clock': mem_clock,
+                })
+
+                time.sleep(DEFAULT_TRACK_POWER_INTERVAL_S)
+
+            except pynvml.NVMLError as e:
+                printing.log_info(f"Error reading GPU metrics: {e}")
+                break
+
+    def start(self, build_dir):
+        if self.tracking_active:
+            raise RuntimeError("Cannot start power tracking while already tracking")
+
+        if not PYNVML_AVAILABLE:
+            raise RuntimeError(
+                "pynvml is not installed. Please install it with: pip install pynvml"
+            )
+
+        # Save the folder where data and plot will be stored
+        self.build_dir = build_dir
+
+        # The csv file where power data will be stored
+        self.csv_path = os.path.join(build_dir, POWER_USAGE_CSV_FILENAME)
+
+        # Initialize NVML
+        try:
+            pynvml.nvmlInit()
+            device_count = pynvml.nvmlDeviceGetCount()
+
+            if device_count == 0:
+                raise RuntimeError("No NVIDIA GPUs found on this system.")
+
+            if self.gpu_index >= device_count:
+                raise RuntimeError(
+                    f"GPU index {self.gpu_index} is out of range. "
+                    f"Found {device_count} GPU(s). Use GPU_DEVICE_INDEX environment variable."
+                )
+
+            self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_index)
+            gpu_name = pynvml.nvmlDeviceGetName(self.gpu_handle)
+
+            printing.log_info(f"Monitoring GPU {self.gpu_index}: {gpu_name}")
+
+        except pynvml.NVMLError as e:
+            raise RuntimeError(f"Failed to initialize NVML: {e}")
+
+        # Start monitoring in a background thread
+        self.tracking_active = True
+        self.power_data = []
+        self.monitoring_thread = threading.Thread(target=self._monitor_power, daemon=True)
+        self.monitoring_thread.start()
+
+        # Warmup period
+        time.sleep(self.warmup_period)
+
+    def stop(self):
+        if self.tracking_active:
+            self.tracking_active = False
+
+            # Wait for monitoring thread to finish
+            if self.monitoring_thread:
+                self.monitoring_thread.join(timeout=5)
+
+            # Cooldown period
+            time.sleep(self.warmup_period)
+
+            # Cleanup NVML
+            try:
+                pynvml.nvmlShutdown()
+            except pynvml.NVMLError:
+                pass
+
+    def generate_results(self, state, timestamp, start_times):
+        if not self.power_data:
+            printing.log_info("No power data collected")
+            state.save_stat(Keys.POWER_USAGE_PLOT, "NONE")
+            return
+
+        if self.tracking_active:
+            self.stop()
+
+        # Convert power data to DataFrame
+        df = pd.DataFrame(self.power_data)
+
+        # Save CSV
+        df.to_csv(self.csv_path, index=False)
+
+        # Remap time to start at 0 when first tool starts
+        if start_times:
+            tool_start_times = sorted(start_times.values())
+            # First tool after warmup (if no tools, then will be time of start of cool down)
+            first_tool_time = tool_start_times[1]
+
+            # Find the offset in our power data
+            initial_power_time = df['time'].iloc[0]
+            time_offset = first_tool_time - time.time() + initial_power_time
+
+            # For simplicity, just make the first measurement time 0
+            df['time'] = df['time'] - df['time'].iloc[0]
+
+        peak_power = max(df['power_draw'])
+
+        # Create a figure with 3 subplots
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 8))
+
+        if start_times:
+            tool_starts = sorted(start_times.items(), key=lambda item: item[1])
+            tool_name_list = [item[0] for item in tool_starts]
+
+            # Adjust to common time frame as power measurements
+            tool_start_list = [
+                max(df['time'].iloc[0], item[1] - (tool_starts[1][1] if len(tool_starts) > 1 else 0))
+                for item in tool_starts
+            ]
+            tool_stop_list = tool_start_list[1:] + [df['time'].values[-1]]
+
+            # Extract power data time series
+            x_time = df['time'].to_numpy()
+            y_power = df['power_draw'].to_numpy()
+
+            # Extract data for each stage in the build
+            self.data = []
+            for name, t0, tf in zip(tool_name_list, tool_start_list, tool_stop_list):
+                x = x_time[(x_time >= t0) * (x_time <= tf)]
+                if len(x) == 0:
+                    continue
+                x = np.insert(x, 0, t0)
+                x = np.insert(x, len(x), tf)
+                y = np.interp(x, x_time, y_power)
+                energy = np.trapz(y, x)
+                avg_power = energy / (tf - t0) if (tf - t0) > 0 else 0
+                stage = {
+                    "name": name,
+                    "t": x.tolist(),
+                    "power": y.tolist(),
+                    "duration": float(tf - t0),
+                    "energy consumed": float(energy),
+                    "average power": float(avg_power),
+                }
+                self.data.append(stage)
+
+            # Plot power usage for each stage
+            for stage in self.data:
+                p = ax1.plot(
+                    stage["t"],
+                    stage["power"],
+                    label=f"{stage['name']} ({stage['duration']:.1f}s, "
+                    f"{stage['energy consumed']:0.1f} J)",
+                )
+                # Add a dashed line to show average power
+                ax1.plot(
+                    [stage["t"][0], stage["t"][-1]],
+                    [stage["average power"], stage["average power"]],
+                    linestyle="--",
+                    c=p[0].get_c(),
+                )
+                # Add average power text to plot
+                ax1.text(
+                    stage["t"][0],
+                    stage["average power"],
+                    f"{stage['average power']:.1f} W ",
+                    horizontalalignment="right",
+                    verticalalignment="center",
+                    c=p[0].get_c(),
+                )
+        else:
+            ax1.plot(df['time'], df['power_draw'])
+
+        # Add title and labels to first plot
+        ax1.set_ylabel("GPU Power Draw [W]")
+        title_str = "NVIDIA GPU Power Stats\n" + "\n".join(textwrap.wrap(state.build_name, 60))
+        ax1.set_title(title_str)
+        ax1.legend()
+        ax1.grid(True)
+
+        # Second plot: Clock speeds and temperature
+        ax2.plot(df['time'], df['gpu_clock'], label='GPU Clock [MHz]')
+        ax2.plot(df['time'], df['memory_clock'], label='Memory Clock [MHz]')
+        ax2.set_ylabel('Clock Frequency [MHz]')
+        ax2.legend(loc=2)
+        ax2.grid(True)
+
+        # Add second y-axis for temperature
+        ax2_twin = ax2.twinx()
+        ax2_twin.plot(df['time'], df['temperature'], label='Temperature [°C]', c='r')
+        ax2_twin.set_ylabel('Temperature [°C]')
+        ax2_twin.legend(loc=1)
+
+        # Third plot: GPU and memory utilization
+        ax3.plot(df['time'], df['gpu_utilization'], label='GPU Utilization [%]')
+        ax3.plot(df['time'], df['memory_utilization'], label='Memory Utilization [%]')
+        ax3.set_xlabel('Time [s]')
+        ax3.set_ylabel('Utilization [%]')
+        ax3.set_ylim([0, 100])
+        ax3.legend()
+        ax3.grid(True)
+
+        # Save plot to current folder AND save to cache
+        plot_path = os.path.join(
+            self.build_dir, f"{timestamp}_{POWER_USAGE_PNG_FILENAME}"
+        )
+        fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+        plot_path = os.path.join(os.getcwd(), f"{timestamp}_{POWER_USAGE_PNG_FILENAME}")
+        fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+
+        state.save_stat(Keys.POWER_USAGE_PLOT, plot_path)
+        state.save_stat(Keys.POWER_USAGE_DATA, self.data)
+        state.save_stat(Keys.POWER_USAGE_DATA_CSV, self.csv_path)
+        state.save_stat(Keys.PEAK_GPU_POWER, f"{peak_power:0.1f} W")
+
+
+# Copyright (c) 2025 AMD

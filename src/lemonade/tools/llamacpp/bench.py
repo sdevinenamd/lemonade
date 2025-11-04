@@ -50,6 +50,7 @@ class LlamaCppBench(Bench):
         """
         Helper function to parse CLI arguments into the args expected by run()
         """
+        import os
 
         # Call Tool parse method, NOT the Bench parse method
         parsed_args = Tool.parse(self, state, args, known_only)
@@ -60,16 +61,34 @@ class LlamaCppBench(Bench):
             # Make sure prompts is a list of integers
             if parsed_args.prompts is None:
                 parsed_args.prompts = [default_prompt_length]
-            prompt_ints = []
+
+            # Check if any prompts are file paths or non-integer strings
+            # If so, auto-enable CLI mode
+            needs_cli_mode = False
             for prompt_item in parsed_args.prompts:
-                if prompt_item.isdigit():
+                if not prompt_item.isdigit():
+                    # Check if it's a file path
+                    if os.path.exists(prompt_item):
+                        needs_cli_mode = True
+                        break
+                    # Also enable for non-integer strings (direct prompt text)
+                    else:
+                        needs_cli_mode = True
+                        break
+
+            if needs_cli_mode:
+                # Auto-enable CLI mode and print warning
+                print(f"\nWarning: Detected prompt file paths or text strings. Automatically enabling --cli mode.")
+                print(f"    CLI mode uses llama-cli instead of llama-bench for better prompt support.\n")
+                parsed_args.cli = True
+                # Re-parse with Bench.parse() to handle file paths and strings properly
+                parsed_args = super().parse(state, args, known_only)
+            else:
+                # All prompts are integers, proceed normally
+                prompt_ints = []
+                for prompt_item in parsed_args.prompts:
                     prompt_ints.append(int(prompt_item))
-                else:
-                    raise Exception(
-                        f"When not using the --cli flag to {self.unique_name}, the prompt format must "
-                        "be in integer format."
-                    )
-            parsed_args.prompts = prompt_ints
+                parsed_args.prompts = prompt_ints
 
         return parsed_args
 

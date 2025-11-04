@@ -1054,7 +1054,7 @@ class LlamaCppAdapter(ModelAdapter):
                 env=env,
             )
 
-            raw_output, stderr = process.communicate(timeout=600)
+            raw_output, stderr = process.communicate(timeout=1800)
 
             # save llama-bench command output with performance info to state
             # (can be viewed in state.yaml file in cache)

@@ -83,6 +83,10 @@ setup(
         "model-generate": [
             "model-generate==1.5.0; platform_system=='Windows' and python_version=='3.10'",
         ],
+        # NVIDIA GPU power profiling
+        "nvidia": [
+            "pynvml>=11.5.0",
+        ],
     },
     classifiers=[],
     entry_points={

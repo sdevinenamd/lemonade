@@ -43,6 +43,17 @@ def get_available_profilers(warn_missing=False):
                 "Install lemonade with dev extras: "
                 "pip install lemonade-sdk[dev]"
             )
+    
+    try:
+        from lemonade.profilers.nvidia_power import NVIDIAPowerProfiler
+
+        profilers.append(NVIDIAPowerProfiler)
+    except ImportError:
+        if warn_missing:
+            print(
+                "Warning: NVIDIAPowerProfiler not available. "
+                "Install pynvml: pip install pynvml"
+            )
 
     return profilers
 

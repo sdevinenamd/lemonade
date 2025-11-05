@@ -1067,10 +1067,14 @@ class LlamaCppAdapter(ModelAdapter):
             "-ub",
             1,
         ]
+        ngl_value = "99" if self.device == "igpu" else "0"
+        cmd = cmd + ["-ngl", ngl_value]
         cmd = [str(m) for m in cmd]
 
         # save llama-bench command
-        self.state.llama_bench_cmd = " ".join(cmd)
+        self.state.llama_bench_cmd = getattr(self.state, "llama_bench_cmd", []) + [
+            " ".join(cmd)
+        ]
 
         try:
             # Set up environment with library path for Linux

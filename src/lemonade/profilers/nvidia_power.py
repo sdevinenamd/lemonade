@@ -13,12 +13,6 @@ import lemonade.common.printing as printing
 from lemonade.profilers import Profiler
 from lemonade.tools.report.table import LemonadePerfTable, DictListStat
 
-# try:
-#     import pynvml
-#     PYNVML_AVAILABLE = True
-# except ImportError:
-#     PYNVML_AVAILABLE = False
-PYNVML_AVAILABLE = False
 
 DEFAULT_TRACK_POWER_INTERVAL_S = 0.05  # Sample every 1 second
 DEFAULT_TRACK_POWER_WARMUP_PERIOD = 5  # 5 second warmup
@@ -35,17 +29,11 @@ class Keys:
     # Path to the CSV file containing the power usage data
     POWER_USAGE_DATA_CSV = "power_usage_data_file_nvidia"
 
-    # pynvml metrics
-    PYNVML_PEAK_GPU_POWER = "pynvml_peak_gpu_power"
-    PYNVML_AVG_GPU_POWER = "pynvml_avg_gpu_power"
-    PYNVML_PEAK_GPU_TEMP = "pynvml_peak_gpu_temp"
-    PYNVML_AVG_GPU_TEMP = "pynvml_avg_gpu_temp"
-
     # nvidia-smi metrics
-    SMI_PEAK_GPU_POWER = "smi_peak_gpu_power"
-    SMI_AVG_GPU_POWER = "smi_avg_gpu_power"
-    SMI_PEAK_GPU_TEMP = "smi_peak_gpu_temp"
-    SMI_AVG_GPU_TEMP = "smi_avg_gpu_temp"
+    PEAK_GPU_POWER = "peak_gpu_power"
+    AVG_GPU_POWER = "avg_gpu_power"
+    PEAK_GPU_TEMP = "peak_gpu_temp"
+    AVG_GPU_TEMP = "avg_gpu_temp"
 
 
 # Add column to the Lemonade performance report table for the power data
@@ -75,8 +63,8 @@ class NVIDIAPowerProfiler(Profiler):
             type=int,
             default=None,
             const=DEFAULT_TRACK_POWER_WARMUP_PERIOD,
-            help="Track NVIDIA GPU power consumption using NVML (NVIDIA Management Library) "
-            "and plot the results. Requires pynvml Python package (pip install pynvml). "
+            help="Track NVIDIA GPU power consumption using nvidia-smi "
+            "and plot the results. Requires nvidia-smi to be available in PATH. "
             "Optionally, set the warmup period in seconds "
             f"(default: {DEFAULT_TRACK_POWER_WARMUP_PERIOD}). "
             "This works on Linux/Windows systems with NVIDIA GPUs. "
@@ -88,68 +76,19 @@ class NVIDIAPowerProfiler(Profiler):
         super().__init__()
         self.warmup_period = parser_arg_value
         self.status_stats += [
-            # Keys.PYNVML_PEAK_GPU_POWER,
-            # Keys.PYNVML_AVG_GPU_POWER,
-            # Keys.PYNVML_PEAK_GPU_TEMP,
-            # Keys.PYNVML_AVG_GPU_TEMP,
-            Keys.SMI_PEAK_GPU_POWER,
-            Keys.SMI_AVG_GPU_POWER,
-            Keys.SMI_PEAK_GPU_TEMP,
-            Keys.SMI_AVG_GPU_TEMP,
+            Keys.PEAK_GPU_POWER,
+            Keys.AVG_GPU_POWER,
+            Keys.PEAK_GPU_TEMP,
+            Keys.AVG_GPU_TEMP,
             Keys.POWER_USAGE_PLOT,
         ]
         self.tracking_active = False
         self.build_dir = None
         self.csv_path = None
         self.data = None
-        self.power_data = []
         self.nvidia_smi_data = []
-        self.monitoring_thread = None
         self.nvidia_smi_thread = None
-        self.gpu_handle = None
         self.gpu_index = int(os.getenv("GPU_DEVICE_INDEX", "0"))
-
-    # def _monitor_power(self):
-    #     """Background thread that monitors GPU power consumption using pynvml."""
-    #     start_time = time.time()
-
-    #     while self.tracking_active:
-    #         try:
-    #             current_time = time.time() - start_time
-
-    #             # Get GPU metrics
-    #             power_draw = pynvml.nvmlDeviceGetPowerUsage(self.gpu_handle) / 1000.0  # Convert mW to W
-    #             temperature = pynvml.nvmlDeviceGetTemperature(self.gpu_handle, pynvml.NVML_TEMPERATURE_GPU)
-
-    #             # Get GPU utilization
-    #             utilization = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle)
-    #             gpu_util = utilization.gpu
-    #             mem_util = utilization.memory
-
-    #             # Get clock speeds
-    #             # try:
-    #             #     gpu_clock = pynvml.nvmlDeviceGetClockInfo(self.gpu_handle, pynvml.NVML_CLOCK_GRAPHICS)
-    #             #     mem_clock = pynvml.nvmlDeviceGetClockInfo(self.gpu_handle, pynvml.NVML_CLOCK_MEM)
-    #             # except pynvml.NVMLError:
-    #             #     gpu_clock = 0
-    #             #     mem_clock = 0
-
-    #             # Store data
-    #             self.power_data.append({
-    #                 'time': current_time,
-    #                 'power_draw': power_draw,
-    #                 'temperature': temperature,
-    #                 'gpu_utilization': gpu_util,
-    #                 # 'memory_utilization': mem_util,
-    #                 # 'gpu_clock': gpu_clock,
-    #                 # 'memory_clock': mem_clock,
-    #             })
-
-    #             time.sleep(DEFAULT_TRACK_POWER_INTERVAL_S)
-
-    #         except pynvml.NVMLError as e:
-    #             printing.log_info(f"Error reading GPU metrics: {e}")
-    #             break
 
     def _monitor_nvidia_smi(self):
         """Background thread that monitors GPU power and temperature using nvidia-smi."""
@@ -202,49 +141,17 @@ class NVIDIAPowerProfiler(Profiler):
         if self.tracking_active:
             raise RuntimeError("Cannot start power tracking while already tracking")
 
-        # if not PYNVML_AVAILABLE:
-        #     raise RuntimeError(
-        #         "pynvml is not installed. Please install it with: pip install pynvml"
-        #     )
-
         # Save the folder where data and plot will be stored
         self.build_dir = build_dir
 
         # The csv file where power data will be stored
         self.csv_path = os.path.join(build_dir, POWER_USAGE_CSV_FILENAME)
 
-        # # Initialize NVML
-        # try:
-        #     pynvml.nvmlInit()
-        #     device_count = pynvml.nvmlDeviceGetCount()
-
-        #     if device_count == 0:
-        #         raise RuntimeError("No NVIDIA GPUs found on this system.")
-
-        #     if self.gpu_index >= device_count:
-        #         raise RuntimeError(
-        #             f"GPU index {self.gpu_index} is out of range. "
-        #             f"Found {device_count} GPU(s). Use GPU_DEVICE_INDEX environment variable."
-        #         )
-
-        #     self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_index)
-        #     gpu_name = pynvml.nvmlDeviceGetName(self.gpu_handle)
-
-        #     printing.log_info(f"Monitoring GPU {self.gpu_index}: {gpu_name}")
-
-        # except pynvml.NVMLError as e:
-        #     raise RuntimeError(f"Failed to initialize NVML: {e}")
-
         printing.log_info(f"Monitoring GPU {self.gpu_index} using nvidia-smi")
 
-        # Start monitoring in background threads
+        # Start monitoring in background thread
         self.tracking_active = True
-        self.power_data = []
         self.nvidia_smi_data = []
-
-        # # Start pynvml monitoring thread
-        # self.monitoring_thread = threading.Thread(target=self._monitor_power, daemon=True)
-        # self.monitoring_thread.start()
 
         # Start nvidia-smi monitoring thread
         self.nvidia_smi_thread = threading.Thread(target=self._monitor_nvidia_smi, daemon=True)
@@ -257,20 +164,12 @@ class NVIDIAPowerProfiler(Profiler):
         if self.tracking_active:
             self.tracking_active = False
 
-            # Wait for monitoring threads to finish
-            # if self.monitoring_thread:
-            #     self.monitoring_thread.join(timeout=5)
+            # Wait for monitoring thread to finish
             if self.nvidia_smi_thread:
                 self.nvidia_smi_thread.join(timeout=5)
 
             # Cooldown period
             time.sleep(self.warmup_period)
-
-            # # Cleanup NVML
-            # try:
-            #     pynvml.nvmlShutdown()
-            # except pynvml.NVMLError:
-            #     pass
 
     def generate_results(self, state, timestamp, start_times):
         # Use nvidia-smi data as primary data source
@@ -301,27 +200,16 @@ class NVIDIAPowerProfiler(Profiler):
             # For simplicity, just make the first measurement time 0
             df['time'] = df['time'] - df['time'].iloc[0]
 
-        # # Calculate statistics from pynvml data
-        # pynvml_peak_power = max(df['power_draw'])
-        # pynvml_peak_temp = max(df['temperature'])
-        # pynvml_avg_power = df['power_draw'].mean()
-        # pynvml_avg_temp = df['temperature'].mean()
-
-        # printing.log_info(f"pynvml: Peak Power={pynvml_peak_power:.1f}W, "
-        #                 f"Avg Power={pynvml_avg_power:.1f}W, "
-        #                 f"Peak Temp={pynvml_peak_temp:.1f}°C, "
-        #                 f"Avg Temp={pynvml_avg_temp:.1f}°C")
-
         # Calculate statistics from nvidia-smi data
-        smi_peak_power = max(df['power_draw'])
-        smi_peak_temp = max(df['temperature'])
-        smi_avg_power = df['power_draw'].mean()
-        smi_avg_temp = df['temperature'].mean()
+        peak_power = max(df['power_draw'])
+        peak_temp = max(df['temperature'])
+        avg_power = df['power_draw'].mean()
+        avg_temp = df['temperature'].mean()
 
-        printing.log_info(f"nvidia-smi: Peak Power={smi_peak_power:.1f}W, "
-                        f"Avg Power={smi_avg_power:.1f}W, "
-                        f"Peak Temp={smi_peak_temp:.1f}°C, "
-                        f"Avg Temp={smi_avg_temp:.1f}°C")
+        printing.log_info(f"nvidia-smi: Peak Power={peak_power:.1f}W, "
+                        f"Avg Power={avg_power:.1f}W, "
+                        f"Peak Temp={peak_temp:.1f}°C, "
+                        f"Avg Temp={avg_temp:.1f}°C")
 
         # Create a figure with 3 subplots
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 8))
@@ -491,17 +379,11 @@ class NVIDIAPowerProfiler(Profiler):
         state.save_stat(Keys.POWER_USAGE_DATA, self.data)
         state.save_stat(Keys.POWER_USAGE_DATA_CSV, self.csv_path)
 
-        # # Save pynvml statistics
-        # state.save_stat(Keys.PYNVML_PEAK_GPU_POWER, f"{pynvml_peak_power:0.1f} W")
-        # state.save_stat(Keys.PYNVML_AVG_GPU_POWER, f"{pynvml_avg_power:0.1f} W")
-        # state.save_stat(Keys.PYNVML_PEAK_GPU_TEMP, f"{pynvml_peak_temp:0.1f} °C")
-        # state.save_stat(Keys.PYNVML_AVG_GPU_TEMP, f"{pynvml_avg_temp:0.1f} °C")
-
-        # Save nvidia-smi statistics
-        state.save_stat(Keys.SMI_PEAK_GPU_POWER, f"{smi_peak_power:0.1f} W")
-        state.save_stat(Keys.SMI_AVG_GPU_POWER, f"{smi_avg_power:0.1f}W")
-        state.save_stat(Keys.SMI_PEAK_GPU_TEMP, f"{smi_peak_temp:0.1f} °C")
-        state.save_stat(Keys.SMI_AVG_GPU_TEMP, f"{smi_avg_temp:0.1f} °C")
+        # Save statistics
+        state.save_stat(Keys.PEAK_GPU_POWER, f"{peak_power:0.1f} W")
+        state.save_stat(Keys.AVG_GPU_POWER, f"{avg_power:0.1f} W")
+        state.save_stat(Keys.PEAK_GPU_TEMP, f"{peak_temp:0.1f} °C")
+        state.save_stat(Keys.AVG_GPU_TEMP, f"{avg_temp:0.1f} °C")
 
 
 # Copyright (c) 2025 AMD
